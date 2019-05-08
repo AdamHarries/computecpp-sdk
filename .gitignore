@@ -24,6 +24,9 @@ build/
 *.bak
 *.swp
 
+# VSCode files
+.vscode
+
 # HTML/PDF output from documentation
 html/
 *.html
