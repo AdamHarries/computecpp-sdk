@@ -38,42 +38,43 @@
 template <typename read_accessor_t, typename write_accessor_t>
 class conv {
  private:
-  read_accessor_t fil_acc;         // filter accessor
-  read_accessor_t in_acc;          // input accessor
-  write_accessor_t out_acc;        // output accessor
-  const matrix_size_t total_size;  // total input size
-  const matrix_size_t fil_size;    // filter size
+  read_accessor_t filter_acc;       // filter accessor
+  read_accessor_t in_acc;           // input accessor
+  write_accessor_t out_acc;         // output accessor
+  const matrix_size_t total_size;   // total input size
+  const matrix_size_t filter_size;  // filter size
 
  public:
-  conv(read_accessor_t fil_acc_, read_accessor_t in_acc_,
+  conv(read_accessor_t filter_acc_, read_accessor_t in_acc_,
        write_accessor_t out_acc_, const matrix_size_t total_size_,
-       const matrix_size_t fil_size_)
-      : fil_acc(fil_acc_),
+       const matrix_size_t filter_size_)
+      : filter_acc(filter_acc_),
         in_acc(in_acc_),
         out_acc(out_acc_),
         total_size(total_size_),
-        fil_size(fil_size_) {}
+        filter_size(filter_size_) {}
   void inline operator()(cl::sycl::nd_item<2> item_id) {
     int id_m = item_id.get_global_id(0);  // global id with offset m
     int id_n = item_id.get_global_id(1);  // global id with offset n
     if ((id_m >= total_size.m) || (id_n >= total_size.n)) {
       return;
     }
-    // input index m , filter index fil_m , input index n, filter index fil_n
-    int m, fil_m, n, fil_n;
+    // input index m , filter index filter_m , input index n, filter index
+    // filter_n
+    int m, filter_m, n, filter_n;
     typename write_accessor_t::value_type val = 0.0;
     // loop over filter size m and add halo to input m
-    for (fil_m = 0, m = -1; fil_m < fil_size.m; fil_m++, m++) {
+    for (filter_m = 0, m = -1; filter_m < filter_size.m; filter_m++, m++) {
       int in_id_m = (id_m + m >= 0) ? id_m + m : 0;
       in_id_m = (in_id_m < total_size.m) ? in_id_m : total_size.m - 1;
       // loop over filter size n and add halo to input n
-      for (fil_n = 0, n = -1; fil_n < fil_size.n; fil_n++, n++) {
+      for (filter_n = 0, n = -1; filter_n < filter_size.n; filter_n++, n++) {
         int in_id_n = (id_n + n >= 0) ? id_n + n : 0;
         in_id_n = (in_id_n < total_size.n) ? in_id_n : total_size.n - 1;
-        val += (in_acc[in_id_m][in_id_n] * fil_acc[fil_m][fil_n]);
+        val += (in_acc[in_id_m][in_id_n] * filter_acc[filter_m][filter_n]);
       }
     }
-    out_acc[id_m][id_n] = val / fil_size.size();
+    out_acc[id_m][id_n] = val / filter_size.size();
   }
 };
 
@@ -84,8 +85,8 @@ int main() {
   constexpr auto total_buffer =
       matrix_size_t{input_data_info::N, input_data_info::N};
   // tile size per iteration
-  constexpr auto mat_size = total_buffer / input_data_info::divider;
-  constexpr auto fil_size = matrix_size_t{3, 3};
+  constexpr auto tile_size = total_buffer / input_data_info::divider;
+  constexpr auto filter_size = matrix_size_t{3, 3};
 
   static constexpr auto read_t = cl::sycl::access::mode::read;
   static constexpr auto write_t = cl::sycl::access::mode::write;
@@ -97,8 +98,8 @@ int main() {
       cl::sycl::accessor<data_t, 2, write_t, global_buffer_t>;
 
   // constructing the tile size
-  auto num_host_tile_n = total_buffer.n / mat_size.n;
-  auto num_host_tile_m = total_buffer.m / mat_size.m;
+  auto num_host_tile_n = total_buffer.n / tile_size.n;
+  auto num_host_tile_m = total_buffer.m / tile_size.m;
   // input value
   auto input_data = data_t(0.6);
   // mask filter value
@@ -106,7 +107,7 @@ int main() {
   // input array
   std::vector<data_t> input(total_buffer.size(), input_data);
   // mask array
-  std::vector<data_t> filter(fil_size.size(), filter_data);
+  std::vector<data_t> filter(filter_size.size(), filter_data);
 
   // enabling SYCL queue profiling
   auto prop_list =
@@ -139,8 +140,8 @@ int main() {
   auto in_buff = cl::sycl::buffer<data_t, 2>(
       input.data(), cl::sycl::range<2>(total_buffer.m, total_buffer.n));
   // mask(filter) SYCL buffer
-  auto fil_buff = cl::sycl::buffer<data_t, 2>(
-      filter.data(), cl::sycl::range<2>(fil_size.m, fil_size.n));
+  auto filter_buff = cl::sycl::buffer<data_t, 2>(
+      filter.data(), cl::sycl::range<2>(filter_size.m, filter_size.n));
   // output SYCL buffer
   auto out_buff = cl::sycl::buffer<data_t, 2>(
       cl::sycl::range<2>(total_buffer.m, total_buffer.n));
@@ -163,24 +164,24 @@ int main() {
       int range_src_n, offset_src_n;
       std::array<bool, 2> clamped_edge = {};
       // calculating the halo for first dimension of the tile
-      compute_index(total_buffer.m, mat_size.m, fil_size.m, host_offset_m,
+      compute_index(total_buffer.m, tile_size.m, filter_size.m, host_offset_m,
                     range_src_m, offset_src_m, clamped_edge);
       // calculating the halo for the second dimension of the tile
-      compute_index(total_buffer.n, mat_size.n, fil_size.n, host_offset_n,
+      compute_index(total_buffer.n, tile_size.n, filter_size.n, host_offset_n,
                     range_src_n, offset_src_n, clamped_edge);
       int i = n + m * num_host_tile_n;
       starts[i] = std::chrono::system_clock::now();
       events[i] = sycl_queue.submit([&](cl::sycl::handler& cgh) {
-        auto fil_acc = fil_buff.get_access<read_t, global_buffer_t>(cgh);
+        auto filter_acc = filter_buff.get_access<read_t, global_buffer_t>(cgh);
         auto in_acc = in_buff.get_access<read_t, global_buffer_t>(
             cgh, cl::sycl::range<2>(range_src_m, range_src_n),
             cl::sycl::id<2>(offset_src_m, offset_src_n));
         auto out_acc = out_buff.get_access<write_t, global_buffer_t>(
-            cgh, cl::sycl::range<2>(mat_size.m, mat_size.n),
+            cgh, cl::sycl::range<2>(tile_size.m, tile_size.n),
             cl::sycl::id<2>(host_offset_m, host_offset_n));
         const auto global_size = round_up(
-            mat_size, matrix_size_t{opencl_configuration_t::local_size_m,
-                                    opencl_configuration_t::local_size_n});
+            tile_size, matrix_size_t{opencl_configuration_t::local_size_m,
+                                     opencl_configuration_t::local_size_n});
         cgh.parallel_for(
             sycl_program.template get_kernel<kernel_type>(),
             cl::sycl::nd_range<2>(
@@ -188,11 +189,12 @@ int main() {
                 cl::sycl::range<2>(opencl_configuration_t::local_size_m,
                                    opencl_configuration_t::local_size_n),
                 cl::sycl::id<2>(host_offset_m, host_offset_n)),
-            kernel_type(fil_acc, in_acc, out_acc, total_buffer, fil_size));
+            kernel_type(filter_acc, in_acc, out_acc, total_buffer,
+                        filter_size));
       });
-      host_offset_n += mat_size.n;
+      host_offset_n += tile_size.n;
     }
-    host_offset_m += mat_size.m;
+    host_offset_m += tile_size.m;
   }
   profiler(events, starts);
 

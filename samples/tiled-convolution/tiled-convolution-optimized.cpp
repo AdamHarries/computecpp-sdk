@@ -39,12 +39,12 @@ int main() {
   constexpr auto total_buffer =
       matrix_size_t{input_data_info::N, input_data_info::N};
   // tile size per iteration
-  constexpr auto mat_size = total_buffer / input_data_info::divider;
-  constexpr auto fil_size = matrix_size_t{3, 3};
+  constexpr auto tile_size = total_buffer / input_data_info::divider;
+  constexpr auto filter_size = matrix_size_t{3, 3};
 
   // constructing the tile size
-  auto num_host_tile_n = total_buffer.n / mat_size.n;
-  auto num_host_tile_m = total_buffer.m / mat_size.m;
+  auto num_host_tile_n = total_buffer.n / tile_size.n;
+  auto num_host_tile_m = total_buffer.m / tile_size.m;
   // input value
   auto input_data = data_t(0.6);
   // mask filter value
@@ -52,7 +52,7 @@ int main() {
   // input array
   std::vector<data_t> input(total_buffer.size(), input_data);
   // mask array
-  std::vector<data_t> filter(fil_size.size(), filter_data);
+  std::vector<data_t> filter(filter_size.size(), filter_data);
 
   // enabling SYCL queue profiling
   auto prop_list =
@@ -87,10 +87,10 @@ int main() {
       {context_bound_property});
   in_buff.set_write_back(false);
   // mask(filter) SYCL buffer
-  auto fill_buff = cl::sycl::buffer<data_t, 2>(
-      filter.data(), cl::sycl::range<2>(fil_size.m, fil_size.n),
+  auto filter_buff = cl::sycl::buffer<data_t, 2>(
+      filter.data(), cl::sycl::range<2>(filter_size.m, filter_size.n),
       {context_bound_property});
-  fill_buff.set_write_back(false);
+  filter_buff.set_write_back(false);
   // output SYCL buffer
   auto out_buff = cl::sycl::buffer<data_t, 2>(
       cl::sycl::range<2>(total_buffer.m, total_buffer.n),
@@ -120,12 +120,11 @@ int main() {
           cl::sycl::codeplay::property::prefer);
   // Create temporary input buffer using on-chip memory
   auto temp_in_buff = cl::sycl::buffer<data_t, 2>(
-      cl::sycl::range<2>(mat_size.m + 2, mat_size.n + 2),
-      {context_bound_property, use_onchip_memory_property});
+      cl::sycl::range<2>(tile_size.m + 2, tile_size.n + 2),
+      {context_bound_property});
   // Create temporary output buffer using on-chip memory
   auto temp_out_buff = cl::sycl::buffer<data_t, 2>(
-      cl::sycl::range<2>(mat_size.m, mat_size.n),
-      {context_bound_property, use_onchip_memory_property});
+      cl::sycl::range<2>(tile_size.m, tile_size.n), {context_bound_property});
 
   // Force output to zero
   sycl_queue.submit([&](cl::sycl::handler& cgh) {
@@ -143,10 +142,10 @@ int main() {
       std::array<bool, 2> clamped_edge_n = {};
 
       // calculating the halo for first dimension of the tile
-      compute_index(total_buffer.m, mat_size.m, fil_size.m, host_offset_m,
+      compute_index(total_buffer.m, tile_size.m, filter_size.m, host_offset_m,
                     range_src_m, offset_src_m, clamped_edge_m);
       // calculating the halo for the second dimension of the tile
-      compute_index(total_buffer.n, mat_size.n, fil_size.n, host_offset_n,
+      compute_index(total_buffer.n, tile_size.n, filter_size.n, host_offset_n,
                     range_src_n, offset_src_n, clamped_edge_n);
 
       // copying a specific region form in_buffer to the
@@ -161,22 +160,22 @@ int main() {
 
       // execute the tile convolution
       tiled_cov<conv_kernel_type>(
-          sycl_queue, sycl_program, temp_in_buff, fill_buff, temp_out_buff,
-          mat_size, matrix_size_t{range_src_m, range_src_n}, fil_size, i,
+          sycl_queue, sycl_program, temp_in_buff, filter_buff, temp_out_buff,
+          tile_size, matrix_size_t{range_src_m, range_src_n}, filter_size, i,
           events, starts, clamped_edge_m[0], clamped_edge_n[0]);
 
       // copy the data back
       sycl_queue.submit([&](cl::sycl::handler& cgh) {
         auto temp_out_acc = temp_out_buff.template get_access<read_t>(cgh);
         auto out_acc = out_buff.get_access<write_t>(
-            cgh, cl::sycl::range<2>(mat_size.m, mat_size.n),
+            cgh, cl::sycl::range<2>(tile_size.m, tile_size.n),
             cl::sycl::id<2>(host_offset_m, host_offset_n));
         cgh.copy(temp_out_acc, out_acc);
       });
 
-      host_offset_n += mat_size.n;
+      host_offset_n += tile_size.n;
     }
-    host_offset_m += mat_size.m;
+    host_offset_m += tile_size.m;
   }
   profiler(events, starts);
 
