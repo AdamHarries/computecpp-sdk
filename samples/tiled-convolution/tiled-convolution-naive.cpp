@@ -27,6 +27,7 @@
  *    See the README for further information.
  *
  **************************************************************************/
+
 #include "common.hpp"
 
 using time_point_vector_t =
@@ -132,12 +133,16 @@ int main() {
       matrix_size_t{input_data_info::N, input_data_info::N};
 
   // tile size per iteration
-  constexpr auto tile_size = total_buffer / input_data_info::divider;
+  // constexpr auto tile_size = total_buffer / input_data_info::divider;
+  constexpr auto tile_size = matrix_size_t{128, 128};
   constexpr auto filter_size = matrix_size_t{3, 3};
 
   // constructing the tile size
   auto num_host_tile_n = total_buffer.n / tile_size.n;
   auto num_host_tile_m = total_buffer.m / tile_size.m;
+
+  std::cout << "num_host_tile_n: " << num_host_tile_n << std::endl;
+  std::cout << "num_host_tile_m: " << num_host_tile_m << std::endl;
   // input value
   auto input_data = data_t(0.6);
   // mask filter value
@@ -233,10 +238,10 @@ int main() {
       std::array<bool, 2> clamped_edge_m = {};
       std::array<bool, 2> clamped_edge_n = {};
 
-      // calculating the halo for first dimension of the tile
+      // calculate the halo for first dimension of the tile
       compute_index(total_buffer.m, tile_size.m, filter_size.m, host_offset_m,
                     range_src_m, offset_src_m, clamped_edge_m);
-      // calculating the halo for the second dimension of the tile
+      // calculate the halo for the second dimension of the tile
       compute_index(total_buffer.n, tile_size.n, filter_size.n, host_offset_n,
                     range_src_n, offset_src_n, clamped_edge_n);
 
@@ -274,5 +279,19 @@ int main() {
 
   const auto result = validate(total_buffer, out_buff.get_access<read_t>(),
                                (filter_data * input_data));
+
+  std::vector<data_t> bf(input_data_info::N * input_data_info::N);
+
+  auto host_acc = out_buff.get_access<read_t>();
+
+  for (int n = 0; n < input_data_info::N; n++) {
+    for (int m = 0; m < input_data_info::N; m++) {
+      bf[(n * input_data_info::N) + m] = host_acc[n][m];
+    }
+  }
+
+  stbi_write_png("testfile.png", input_data_info::N, input_data_info::N, 2,
+                 bf.data(), 0);
+
   return result ? 0 : -1;
 }

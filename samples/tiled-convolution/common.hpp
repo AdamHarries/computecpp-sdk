@@ -35,6 +35,15 @@
 #include <ctime>
 #include <iostream>
 
+/* These public-domain headers implement useful image reading and writing
+ * functions. */
+#ifdef _MSC_VER
+typedef unsigned int uint;
+#endif
+#include "../gaussian-blur/stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "../gaussian-blur/stb_image_write.h"
+
 // define the 2-d matrix size
 class matrix_size_t {
  public:
