@@ -37,16 +37,62 @@
 constexpr cl::sycl::access::mode sycl_read = cl::sycl::access::mode::read;
 constexpr cl::sycl::access::mode sycl_write = cl::sycl::access::mode::write;
 
+template <typename InAccessorT, typename OutAccessorT, typename T>
+class VectorAddition {
+ private:
+  const int _cache_line_size;
+  const int _N;
+  const InAccessorT _accessorA, _accessorB;
+  const OutAccessorT _accessorC;
+
+ public:
+  VectorAddition(int cache_line_size, int N, InAccessorT accessorA,
+                 InAccessorT accessorB, OutAccessorT accessorC)
+      : _cache_line_size(cache_line_size),
+        _N(N),
+        _accessorA(accessorA),
+        _accessorB(accessorB),
+        _accessorC(accessorC) {}
+
+  void eval(cl::sycl::nd_item<1> work_item) {
+      T private_A[_cache_line_size];
+      T private_B[_cache_line_size];
+
+      int global_id = static_cast<int>(work_item.get_global_id(0));
+      int global_range = static_cast<int>(work_item.get_global_range()[0]);
+
+      int id = global_id * _cache_line_size;
+      for (int i = id; i < _N; i += _cache_line_size * global_range) {
+#pragma unroll 8
+        for (int j = 0; j < _cache_line_size; j++) {
+          private_A[j] = _accessorA[i + j];
+        }
+        work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+#pragma unroll 8
+        for (int j = 0; j < _cache_line_size; j++) {
+          private_B[j] = _accessorB[i + j];
+        }
+        // work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+#pragma unroll 8
+        for (int j = 0; j < _cache_line_size; j++) {
+          _accessorC[j] = private_A[j] + private_B[j];
+        }
+      
+    }
+  }
+
+};
+
 template <int CacheLineSize, bool UseOnchipMemory, bool SinglePrivateArray,
           typename T>
 class VAdd;
 
 template <int CacheLineSize, bool UseOnchipMemory, bool SinglePrivateArray,
           typename T>
-std::tuple<double, double>
-// cl::sycl::event
-vadd(cl::sycl::queue& q, cl::sycl::context& c, cl::sycl::nd_range<1> exec_range,
-     const std::vector<T>& VA, const std::vector<T>& VB, std::vector<T>& VC) {
+std::tuple<double, double> vadd(cl::sycl::queue& q, cl::sycl::context& c,
+                                cl::sycl::nd_range<1> exec_range,
+                                const std::vector<T>& VA,
+                                const std::vector<T>& VB, std::vector<T>& VC) {
   // Get the size of the input(s), and verify that they're all the same
   assert((VA.size() == VB.size()) && (VB.size() == VC.size()));
 
@@ -63,7 +109,7 @@ vadd(cl::sycl::queue& q, cl::sycl::context& c, cl::sycl::nd_range<1> exec_range,
           : cl::sycl::property_list(
                 {cl::sycl::property::buffer::context_bound(c)});
 
-  // Create onchip buffers.
+  // Create buffers for the actual kernel.
   cl::sycl::buffer<T, 1> bufferA(item_range, buffer_properties);
   cl::sycl::buffer<T, 1> bufferB(item_range, buffer_properties);
   cl::sycl::buffer<T, 1> bufferC(item_range, buffer_properties);
@@ -83,6 +129,12 @@ vadd(cl::sycl::queue& q, cl::sycl::context& c, cl::sycl::nd_range<1> exec_range,
 
   cl::sycl::codeplay::flush(q);
 
+  /* Get the size of the intput data as an integer, as opposed to a size_t.
+   This is to reduce the number of registers that each index variable uses.
+   As `size_t` is a 64-bit type on Renesas hardware variables of type `size_t`
+   use two registers while variable of `int`, which is a 32-bit type, use a
+   single register
+  */
   const int kernel_n = static_cast<int>(N);
 
   // Perform the actual vector add!
@@ -112,6 +164,7 @@ vadd(cl::sycl::queue& q, cl::sycl::context& c, cl::sycl::nd_range<1> exec_range,
           for (int j = 0; j < CacheLineSize; j++) {
             private_A[j] += accessorB[i + j];
           }
+          work_item.mem_fence(cl::sycl::access::fence_space::local_space);
           // for (int j = 0; j < CacheLineSize; j++) {
           //   private_B[j] = accessorB[i + j];
           // }
@@ -124,7 +177,6 @@ vadd(cl::sycl::queue& q, cl::sycl::context& c, cl::sycl::nd_range<1> exec_range,
       } else {
         T private_A[CacheLineSize];
         T private_B[CacheLineSize];
-        // T private_C[CacheLineSize];
 
         int global_id = static_cast<int>(work_item.get_global_id(0));
         int global_range = static_cast<int>(work_item.get_global_range()[0]);
