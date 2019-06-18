@@ -37,55 +37,82 @@
 constexpr cl::sycl::access::mode sycl_read = cl::sycl::access::mode::read;
 constexpr cl::sycl::access::mode sycl_write = cl::sycl::access::mode::write;
 
-template <typename InAccessorT, typename OutAccessorT, typename T>
+template <int CacheLineSize, bool SinglePrivateArray, typename T,
+          typename InAccessorT, typename OutAccessorT>
 class VectorAddition {
  private:
-  const int _cache_line_size;
   const int _N;
   const InAccessorT _accessorA, _accessorB;
   const OutAccessorT _accessorC;
 
  public:
-  VectorAddition(int cache_line_size, int N, InAccessorT accessorA,
-                 InAccessorT accessorB, OutAccessorT accessorC)
-      : _cache_line_size(cache_line_size),
-        _N(N),
+  VectorAddition(int N, InAccessorT accessorA, InAccessorT accessorB,
+                 OutAccessorT accessorC)
+      : _N(N),
         _accessorA(accessorA),
         _accessorB(accessorB),
         _accessorC(accessorC) {}
 
-  void eval(cl::sycl::nd_item<1> work_item) {
-      T private_A[_cache_line_size];
-      T private_B[_cache_line_size];
+  void operator()(cl::sycl::nd_item<1> work_item) {
+    T private_A[CacheLineSize];
+    T private_B[CacheLineSize];
 
-      int global_id = static_cast<int>(work_item.get_global_id(0));
-      int global_range = static_cast<int>(work_item.get_global_range()[0]);
+    int global_id = static_cast<int>(work_item.get_global_id(0));
+    int global_range = static_cast<int>(work_item.get_global_range()[0]);
 
-      int id = global_id * _cache_line_size;
-      for (int i = id; i < _N; i += _cache_line_size * global_range) {
+    int id = global_id * CacheLineSize;
+    for (int i = id; i < _N; i += CacheLineSize * global_range) {
 #pragma unroll 8
-        for (int j = 0; j < _cache_line_size; j++) {
-          private_A[j] = _accessorA[i + j];
-        }
-        work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+      for (int j = 0; j < CacheLineSize; j++) {
+        private_A[j] = _accessorA[i + j];
+      }
+      work_item.mem_fence(cl::sycl::access::fence_space::local_space);
 #pragma unroll 8
-        for (int j = 0; j < _cache_line_size; j++) {
-          private_B[j] = _accessorB[i + j];
-        }
-        // work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+      for (int j = 0; j < CacheLineSize; j++) {
+        private_B[j] = _accessorB[i + j];
+      }
+      work_item.mem_fence(cl::sycl::access::fence_space::local_space);
 #pragma unroll 8
-        for (int j = 0; j < _cache_line_size; j++) {
-          _accessorC[j] = private_A[j] + private_B[j];
-        }
-      
+      for (int j = 0; j < CacheLineSize; j++) {
+        _accessorC[i + j] = private_A[j] + private_B[j];
+      }
     }
   }
 
+//   void operator()(cl::sycl::nd_item<1> work_item) {
+//     T private_A[CacheLineSize];
+
+//     int global_id = static_cast<int>(work_item.get_global_id(0));
+//     int global_range = static_cast<int>(work_item.get_global_range()[0]);
+
+//     int id = global_id * CacheLineSize;
+//     for (int i = id; i < _N; i += CacheLineSize * global_range) {
+// #pragma unroll 8
+//       for (int j = 0; j < CacheLineSize; j++) {
+//         private_A[j] = _accessorA[i + j];
+//       }
+//       work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+// #pragma unroll 8
+//       for (int j = 0; j < CacheLineSize; j++) {
+//         private_A[j] += _accessorB[i + j];
+//       }
+//       work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+// #pragma unroll 8
+//       for (int j = 0; j < CacheLineSize; j++) {
+//         _accessorC[i + j] = private_A[j];
+//       }
+//     }
+//   }
 };
 
-template <int CacheLineSize, bool UseOnchipMemory, bool SinglePrivateArray,
-          typename T>
-class VAdd;
+template <int CacheLineSize, bool SinglePrivateArray, typename T,
+          typename InAccessorT, typename OutAccessorT>
+VectorAddition<CacheLineSize, SinglePrivateArray, T, InAccessorT, OutAccessorT>
+make_vector_add(int N, InAccessorT accessorA, InAccessorT accessorB,
+                OutAccessorT accessorC) {
+  return VectorAddition<CacheLineSize, SinglePrivateArray, T, InAccessorT,
+                        OutAccessorT>(N, accessorA, accessorB, accessorC);
+}
 
 template <int CacheLineSize, bool UseOnchipMemory, bool SinglePrivateArray,
           typename T>
@@ -143,70 +170,11 @@ std::tuple<double, double> vadd(cl::sycl::queue& q, cl::sycl::context& c,
     auto accessorB = bufferB.template get_access<sycl_read>(cgh);
     auto accessorC = bufferC.template get_access<sycl_write>(cgh);
 
-    auto vector_add_kernel = VectorAddition(CacheLineSize, static_cast<int>(N), accessorA, accessorB, accessorC); 
+    auto vector_add_kernel =
+        make_vector_add<CacheLineSize, SinglePrivateArray, float>(
+            static_cast<int>(N), accessorA, accessorB, accessorC);
 
-    cgh.parallel_for<class VAdd<CacheLineSize, UseOnchipMemory, SinglePrivateArray, T>>(exec_range,
-		[kernel_n, accessorA, accessorB, accessorC](cl::sycl::nd_item<1> work_item)
-    {
-      if (SinglePrivateArray) {
-        T private_A[CacheLineSize];
-        // T private_B[CacheLineSize];
-
-        int global_id = static_cast<int>(work_item.get_global_id(0));
-        int global_range = static_cast<int>(work_item.get_global_range()[0]);
-
-        int id = global_id * CacheLineSize;
-        for (int i = id; i < kernel_n; i += CacheLineSize * global_range) {
-#pragma unroll 8
-          for (int j = 0; j < CacheLineSize; j++) {
-            private_A[j] = accessorA[i + j];
-          }
-          work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-#pragma unroll 8
-          for (int j = 0; j < CacheLineSize; j++) {
-            private_A[j] += accessorB[i + j];
-          }
-          work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-          // for (int j = 0; j < CacheLineSize; j++) {
-          //   private_B[j] = accessorB[i + j];
-          // }
-          // work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-#pragma unroll 8
-          for (int j = 0; j < CacheLineSize; j++) {
-            accessorC[i + j] = private_A[j];
-          }
-        }
-      } else {
-        T private_A[CacheLineSize];
-        T private_B[CacheLineSize];
-
-        int global_id = static_cast<int>(work_item.get_global_id(0));
-        int global_range = static_cast<int>(work_item.get_global_range()[0]);
-
-        int id = global_id * CacheLineSize;
-        for (int i = id; i < kernel_n; i += CacheLineSize * global_range) {
-#pragma unroll 8
-          for (int j = 0; j < CacheLineSize; j++) {
-            private_A[j] = accessorA[i + j];
-          }
-          work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-#pragma unroll 8
-          for (int j = 0; j < CacheLineSize; j++) {
-            private_B[j] = accessorB[i + j];
-          }
-          // work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-#pragma unroll 8
-          for (int j = 0; j < CacheLineSize; j++) {
-            accessorC[j] = private_A[j] + private_B[j];
-          }
-
-          // #pragma unroll 8
-          //           for (int j = 0; j < CacheLineSize; j++) {
-          // accessorC[i + j] = private_C[j];
-          //           }
-        }
-      }
-  });
+    cgh.parallel_for(exec_range, vector_add_kernel);
   });
 
   cl::sycl::codeplay::flush(q);
