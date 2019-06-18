@@ -143,6 +143,8 @@ std::tuple<double, double> vadd(cl::sycl::queue& q, cl::sycl::context& c,
     auto accessorB = bufferB.template get_access<sycl_read>(cgh);
     auto accessorC = bufferC.template get_access<sycl_write>(cgh);
 
+    auto vector_add_kernel = VectorAddition(CacheLineSize, static_cast<int>(N), accessorA, accessorB, accessorC); 
+
     cgh.parallel_for<class VAdd<CacheLineSize, UseOnchipMemory, SinglePrivateArray, T>>(exec_range,
 		[kernel_n, accessorA, accessorB, accessorC](cl::sycl::nd_item<1> work_item)
     {
