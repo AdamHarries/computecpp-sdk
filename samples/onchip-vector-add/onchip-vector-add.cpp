@@ -37,8 +37,8 @@
 constexpr cl::sycl::access::mode sycl_read = cl::sycl::access::mode::read;
 constexpr cl::sycl::access::mode sycl_write = cl::sycl::access::mode::write;
 
-template <int CacheLineSize, bool SinglePrivateArray, typename T,
-          typename InAccessorT, typename OutAccessorT>
+template <int CacheLineSize, typename T, typename InAccessorT,
+          typename OutAccessorT>
 class VectorAddition {
  private:
   const int _N;
@@ -79,43 +79,42 @@ class VectorAddition {
     }
   }
 
-//   void operator()(cl::sycl::nd_item<1> work_item) {
-//     T private_A[CacheLineSize];
+  //   void operator()(cl::sycl::nd_item<1> work_item) {
+  //     T private_A[CacheLineSize];
 
-//     int global_id = static_cast<int>(work_item.get_global_id(0));
-//     int global_range = static_cast<int>(work_item.get_global_range()[0]);
+  //     int global_id = static_cast<int>(work_item.get_global_id(0));
+  //     int global_range = static_cast<int>(work_item.get_global_range()[0]);
 
-//     int id = global_id * CacheLineSize;
-//     for (int i = id; i < _N; i += CacheLineSize * global_range) {
-// #pragma unroll 8
-//       for (int j = 0; j < CacheLineSize; j++) {
-//         private_A[j] = _accessorA[i + j];
-//       }
-//       work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-// #pragma unroll 8
-//       for (int j = 0; j < CacheLineSize; j++) {
-//         private_A[j] += _accessorB[i + j];
-//       }
-//       work_item.mem_fence(cl::sycl::access::fence_space::local_space);
-// #pragma unroll 8
-//       for (int j = 0; j < CacheLineSize; j++) {
-//         _accessorC[i + j] = private_A[j];
-//       }
-//     }
-//   }
+  //     int id = global_id * CacheLineSize;
+  //     for (int i = id; i < _N; i += CacheLineSize * global_range) {
+  // #pragma unroll 8
+  //       for (int j = 0; j < CacheLineSize; j++) {
+  //         private_A[j] = _accessorA[i + j];
+  //       }
+  //       work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+  // #pragma unroll 8
+  //       for (int j = 0; j < CacheLineSize; j++) {
+  //         private_A[j] += _accessorB[i + j];
+  //       }
+  //       work_item.mem_fence(cl::sycl::access::fence_space::local_space);
+  // #pragma unroll 8
+  //       for (int j = 0; j < CacheLineSize; j++) {
+  //         _accessorC[i + j] = private_A[j];
+  //       }
+  //     }
+  //   }
 };
 
-template <int CacheLineSize, bool SinglePrivateArray, typename T,
-          typename InAccessorT, typename OutAccessorT>
-VectorAddition<CacheLineSize, SinglePrivateArray, T, InAccessorT, OutAccessorT>
-make_vector_add(int N, InAccessorT accessorA, InAccessorT accessorB,
-                OutAccessorT accessorC) {
-  return VectorAddition<CacheLineSize, SinglePrivateArray, T, InAccessorT,
-                        OutAccessorT>(N, accessorA, accessorB, accessorC);
+template <int CacheLineSize, typename T, typename InAccessorT,
+          typename OutAccessorT>
+VectorAddition<CacheLineSize, T, InAccessorT, OutAccessorT> make_vector_add(
+    int N, InAccessorT accessorA, InAccessorT accessorB,
+    OutAccessorT accessorC) {
+  return VectorAddition<CacheLineSize, T, InAccessorT, OutAccessorT>(
+      N, accessorA, accessorB, accessorC);
 }
 
-template <int CacheLineSize, bool UseOnchipMemory, bool SinglePrivateArray,
-          typename T>
+template <int CacheLineSize, bool UseOnchipMemory, typename T>
 std::tuple<double, double> vadd(cl::sycl::queue& q, cl::sycl::context& c,
                                 cl::sycl::nd_range<1> exec_range,
                                 const std::vector<T>& VA,
@@ -127,34 +126,50 @@ std::tuple<double, double> vadd(cl::sycl::queue& q, cl::sycl::context& c,
 
   cl::sycl::range<1> item_range{N};
 
-  const auto buffer_properties =
-      UseOnchipMemory
-          ? cl::sycl::property_list(
-                {cl::sycl::codeplay::property::buffer::use_onchip_memory(
-                     cl::sycl::codeplay::property::prefer),
-                 cl::sycl::property::buffer::context_bound(c)})
-          : cl::sycl::property_list(
-                {cl::sycl::property::buffer::context_bound(c)});
+  auto context_bound_property = cl::sycl::property::buffer::context_bound(c);
+  auto use_onchip_memory_property =
+      cl::sycl::codeplay::property::buffer::use_onchip_memory(
+          cl::sycl::codeplay::property::prefer);
 
-  // Create buffers for the actual kernel.
-  cl::sycl::buffer<T, 1> bufferA(item_range, buffer_properties);
-  cl::sycl::buffer<T, 1> bufferB(item_range, buffer_properties);
-  cl::sycl::buffer<T, 1> bufferC(item_range, buffer_properties);
+  // Create straightforward DDR buffers
+  // As they are context bound, the data will be immediately copied into them.
+  cl::sycl::buffer<T, 1> ddr_bufferA(VA.data(), item_range,
+                                     {context_bound_property});
+  cl::sycl::buffer<T, 1> ddr_bufferB(VB.data(), item_range,
+                                     {context_bound_property});
+  cl::sycl::buffer<T, 1> ddr_bufferC(VC.data(), item_range,
+                                     {context_bound_property});
+
+  // create onchip buffers, in case `UseOnchipMemory` is specified
+  cl::sycl::buffer<T, 1> onchip_bufferA(
+      item_range, {context_bound_property, use_onchip_memory_property});
+  cl::sycl::buffer<T, 1> onchip_bufferB(
+      item_range, {context_bound_property, use_onchip_memory_property});
+  cl::sycl::buffer<T, 1> onchip_bufferC(
+      item_range, {context_bound_property, use_onchip_memory_property});
+
+  // Flush before starting timings, to make sure that we're accurate in our
+  // timings!
+  cl::sycl::codeplay::flush(q);
 
   auto wallclock_start = std::chrono::system_clock::now();
 
-  // Manually copy data from the host buffers (vectors) to the onchip buffers
-  q.submit([&](cl::sycl::handler& cgh) {
-    auto accessorA = bufferA.template get_access<sycl_write>(cgh);
-    cgh.copy(VA.data(), accessorA);
-  });
-
-  q.submit([&](cl::sycl::handler& cgh) {
-    auto accessorB = bufferB.template get_access<sycl_write>(cgh);
-    cgh.copy(VB.data(), accessorB);
-  });
-
-  cl::sycl::codeplay::flush(q);
+  // If we're using onchip memory, manually copy from the DDR buffers to the
+  // onchip buffers
+  if (UseOnchipMemory) {
+    q.submit([&](cl::sycl::handler& cgh) {
+      auto ddr_accessor = ddr_bufferA.template get_access<sycl_read>(cgh);
+      auto onchip_accessor =
+          onchip_bufferA.template get_access<sycl_write>(cgh);
+      cgh.copy(ddr_accessor, onchip_accessor);
+    });
+    q.submit([&](cl::sycl::handler& cgh) {
+      auto ddr_accessor = ddr_bufferB.template get_access<sycl_read>(cgh);
+      auto onchip_accessor =
+          onchip_bufferB.template get_access<sycl_write>(cgh);
+      cgh.copy(ddr_accessor, onchip_accessor);
+    });
+  }
 
   /* Get the size of the intput data as an integer, as opposed to a size_t.
    This is to reduce the number of registers that each index variable uses.
@@ -166,23 +181,34 @@ std::tuple<double, double> vadd(cl::sycl::queue& q, cl::sycl::context& c,
 
   // Perform the actual vector add!
   auto e = q.submit([&](cl::sycl::handler& cgh) {
-    auto accessorA = bufferA.template get_access<sycl_read>(cgh);
-    auto accessorB = bufferB.template get_access<sycl_read>(cgh);
-    auto accessorC = bufferC.template get_access<sycl_write>(cgh);
+    auto accessorA = UseOnchipMemory
+                         ? onchip_bufferA.template get_access<sycl_read>(cgh)
+                         : ddr_bufferA.template get_access<sycl_read>(cgh);
+    auto accessorB = UseOnchipMemory
+                         ? onchip_bufferB.template get_access<sycl_read>(cgh)
+                         : ddr_bufferB.template get_access<sycl_read>(cgh);
+    auto accessorC = UseOnchipMemory
+                         ? onchip_bufferC.template get_access<sycl_write>(cgh)
+                         : ddr_bufferC.template get_access<sycl_write>(cgh);
 
-    auto vector_add_kernel =
-        make_vector_add<CacheLineSize, SinglePrivateArray, float>(
-            static_cast<int>(N), accessorA, accessorB, accessorC);
+    auto vector_add_kernel = make_vector_add<CacheLineSize, float>(
+        kernel_n, accessorA, accessorB, accessorC);
 
     cgh.parallel_for(exec_range, vector_add_kernel);
   });
 
-  cl::sycl::codeplay::flush(q);
+  // Enqueue a copy operation to manually copy the data back to DDR memory from
+  // onchip memory
+  if (UseOnchipMemory) {
+    q.submit([&](cl::sycl::handler& cgh) {
+      auto ddr_accessor = ddr_bufferC.template get_access<sycl_write>(cgh);
+      auto onchip_accessor = onchip_bufferC.template get_access<sycl_read>(cgh);
+      cgh.copy(onchip_accessor, ddr_accessor);
+    });
+  }
 
-  q.submit([&](cl::sycl::handler& cgh) {
-    auto accessorC = bufferC.template get_access<sycl_read>(cgh);
-    cgh.copy(accessorC, VC.data());
-  });
+  // Flush after running all kernels and copies
+  cl::sycl::codeplay::flush(q);
 
   q.wait();
 
@@ -209,8 +235,12 @@ static int measure_vadd(std::string name, unsigned int elems,
 
   // Run the vector add `iterations` times, and time it.
   std::cout << "Running \"" << name << "\"" << std::endl;
-  // double total_wallclock_time = 0;
-  double best_event_time = std::numeric_limits<float>::max();
+
+  auto best_wallclock_time = std::tuple<double, double>(
+      std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+
+  auto best_event_time = std::tuple<double, double>(
+      std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
 
   for (int i = 0; i < iterations; i++) {
     double event_time, wallclock_time;
@@ -225,18 +255,25 @@ static int measure_vadd(std::string name, unsigned int elems,
       }
     }
 
-    if (event_time < best_event_time) {
-      best_event_time = event_time;
+    if (wallclock_time < std::get<0>(best_wallclock_time)) {
+      best_wallclock_time =
+          std::tuple<double, double>(wallclock_time, event_time);
     }
-    // total_event_time += event_time;
-    // total_wallclock_time += wallclock_time;
+
+    if (event_time < std::get<1>(best_event_time)) {
+      best_event_time = std::tuple<double, double>(wallclock_time, event_time);
+    }
   }
-  // std::cout << "\t- Mean wallclock time: "
-  //           << (1e-6 * total_wallclock_time / iterations) << " ms" <<
-  //           std::endl;
-  std::cout << "\t- Best event time: " << (1e-6 * best_event_time) << " ms"
+
+  std::cout << "\t- Best wallclock time / Assoc event time: " << std::endl
+            << "\t\t" << 1e-6 * std::get<0>(best_wallclock_time) << " ms"
+            << " / " << 1e-6 * std::get<1>(best_wallclock_time) << " ms"
             << std::endl;
 
+  std::cout << "\t- Assoc wallclock time / Best event time: " << std::endl
+            << "\t\t" << 1e-6 * std::get<0>(best_event_time) << " ms"
+            << " / " << 1e-6 * std::get<1>(best_event_time) << " ms"
+            << std::endl;
   return 0;
 }
 
@@ -278,128 +315,65 @@ int main() {
   std::cout << "Global size: " << global_size << std::endl;
   std::cout << "Local size: " << local_size << std::endl;
 
+  std::cout << std::endl;
+
   cl::sycl::nd_range<1> exec_range{global_size, local_size};
 
-  // benchmark various private memory sizes of the "onchip" vector add.
-  std::cout << std::endl << "Benchmarking `onchip` vector adds: " << std::endl;
-  {
-    // measure_vadd<iterations>(
-    //     "Onchip vector add (multiple private memory arrays of size 1)",
-    //     elems, q, c, exec_range, vadd<1, true, false, cl::sycl::cl_float>);
-    // measure_vadd<iterations>(
-    //     "Onchip vector add (single private memory array of size 1)", elems,
-    //     q, c, exec_range, vadd<1, true, true, cl::sycl::cl_float>);
-    // std::cout << std::endl;
+  measure_vadd<iterations>("Onchip vector add (1*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<1, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (1*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<1, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-    // measure_vadd<iterations>(
-    //     "Onchip vector add (multiple private memory arrays of size 4)",
-    //     elems, q, c, exec_range, vadd<4, true, false, cl::sycl::cl_float>);
-    // measure_vadd<iterations>(
-    //     "Onchip vector add (single private memory array of size 4)", elems,
-    //     q, c, exec_range, vadd<4, true, true, cl::sycl::cl_float>);
-    // std::cout << std::endl;
+  measure_vadd<iterations>("Onchip vector add (4*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<4, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (4*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<4, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-    measure_vadd<iterations>(
-        "Onchip vector add (multiple private memory arrays of size 8)", elems,
-        q, c, exec_range, vadd<8, true, false, cl::sycl::cl_float>);
-    measure_vadd<iterations>(
-        "Onchip vector add (single private memory array of size 8)", elems, q,
-        c, exec_range, vadd<8, true, true, cl::sycl::cl_float>);
-    std::cout << std::endl;
+  measure_vadd<iterations>("Onchip vector add (8*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<8, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (8*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<8, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-    measure_vadd<iterations>(
-        "Onchip vector add (multiple private memory arrays of size 16)", elems,
-        q, c, exec_range, vadd<16, true, false, cl::sycl::cl_float>);
-    measure_vadd<iterations>(
-        "Onchip vector add (single private memory array of size 16)", elems, q,
-        c, exec_range, vadd<16, true, true, cl::sycl::cl_float>);
-    std::cout << std::endl;
+  measure_vadd<iterations>("Onchip vector add (1*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<16, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (1*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<16, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-    measure_vadd<iterations>(
-        "Onchip vector add (multiple private memory arrays of size 32)", elems,
-        q, c, exec_range, vadd<32, true, false, cl::sycl::cl_float>);
-    measure_vadd<iterations>(
-        "Onchip vector add (single private memory array of size 32)", elems, q,
-        c, exec_range, vadd<32, true, true, cl::sycl::cl_float>);
-    std::cout << std::endl;
+  measure_vadd<iterations>("Onchip vector add (3*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<32, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (3*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<32, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-    measure_vadd<iterations>(
-        "Onchip vector add (multiple private memory arrays of size 64)", elems,
-        q, c, exec_range, vadd<64, true, false, cl::sycl::cl_float>);
-    measure_vadd<iterations>(
-        "Onchip vector add (single private memory array of size 64)", elems, q,
-        c, exec_range, vadd<64, true, true, cl::sycl::cl_float>);
-    std::cout << std::endl;
+  measure_vadd<iterations>("Onchip vector add (6*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<64, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (6*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<64, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-    // measure_vadd<iterations>(
-    //     "Onchip vector add (multiple private memory arrays of size 128)",
-    //     elems, q, c, exec_range, vadd<128, true, false, cl::sycl::cl_float>);
-    // measure_vadd<iterations>(
-    //     "Onchip vector add (single private memory array of size 128)", elems,
-    //     q, c, exec_range, vadd<128, true, true, cl::sycl::cl_float>);
-    // std::cout << std::endl;
-  }
+  measure_vadd<iterations>("Onchip vector add (1*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<128, true, cl::sycl::cl_float>);
+  measure_vadd<iterations>("DDR vector add (1*2*4 bytes of private memory)",
+                           elems, q, c, exec_range,
+                           vadd<128, false, cl::sycl::cl_float>);
+  std::cout << std::endl;
 
-  // Benchmark various private memory sizes of the "simple" vector add.
-  // std::cout << std::endl << "Benchmarking `simple` vector adds: " <<
-  // std::endl;
-  // {
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 1)",
-  //       elems, q, c, exec_range, vadd<1, false, false, cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 1)", elems,
-  //       q, c, exec_range, vadd<1, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 4)",
-  //       elems, q, c, exec_range, vadd<4, false, false, cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 4)", elems,
-  //       q, c, exec_range, vadd<4, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 8)",
-  //       elems, q, c, exec_range, vadd<8, false, false, cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 8)", elems,
-  //       q, c, exec_range, vadd<8, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 16)",
-  //       elems, q, c, exec_range, vadd<16, false, false, cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 16)", elems,
-  //       q, c, exec_range, vadd<16, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 32)",
-  //       elems, q, c, exec_range, vadd<32, false, false, cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 32)", elems,
-  //       q, c, exec_range, vadd<32, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 64)",
-  //       elems, q, c, exec_range, vadd<64, false, false, cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 64)", elems,
-  //       q, c, exec_range, vadd<64, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (multiple private memory arrays of size 128)",
-  //       elems, q, c, exec_range, vadd<128, false, false,
-  //       cl::sycl::cl_float>);
-  //   measure_vadd<iterations>(
-  //       "Simple vector add (single private memory array of size 128)", elems,
-  //       q, c, exec_range, vadd<128, false, true, cl::sycl::cl_float>);
-  //   std::cout << std::endl;
-  // }
   return 0;
 }
